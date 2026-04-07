@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import json
 
@@ -14,6 +15,9 @@ class FewShotPosts:
     def __init__(self, file_path="data/processed_posts.json"):
         self.df = None
         self.unique_tags = None
+        # Resolve file_path relative to this script so running from any CWD works
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(os.path.dirname(__file__), file_path)
         self.load_posts(file_path)
         
         # Initialize RAG if libraries are available
@@ -29,13 +33,46 @@ class FewShotPosts:
                 self.rag_enabled = False
 
     def load_posts(self, file_path):
-        with open(file_path, encoding="utf-8") as f:
+        # Read file with replacement for invalid bytes, then sanitize any
+        # surrogate codepoints that PyArrow/Pandas can't handle.
+        def _sanitize(obj):
+            # Recursively replace lone surrogate codepoints with the replacement char
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_sanitize(v) for v in obj]
+            if isinstance(obj, str):
+                return ''.join(ch if not (0xD800 <= ord(ch) <= 0xDFFF) else '\uFFFD' for ch in obj)
+            return obj
+
+        with open(file_path, encoding="utf-8", errors="replace") as f:
             posts = json.load(f)
+        posts = _sanitize(posts)
+
+        try:
             self.df = pd.json_normalize(posts)
-            self.df['length'] = self.df['line_count'].apply(self.categorize_length)
-            # collect unique tags
-            all_tags = self.df['tags'].apply(lambda x: x).sum()
-            self.unique_tags = list(set(all_tags))
+        except Exception as e:
+            # Provide a clearer error message for malformed data
+            raise RuntimeError(f"Failed to normalize JSON data from {file_path}: {e}") from e
+
+        # Ensure expected columns exist and have safe defaults/types
+        if 'line_count' not in self.df.columns:
+            self.df['line_count'] = 0
+        else:
+            self.df['line_count'] = pd.to_numeric(self.df['line_count'], errors='coerce').fillna(0).astype(int)
+
+        if 'tags' not in self.df.columns:
+            self.df['tags'] = [[] for _ in range(len(self.df))]
+        else:
+            # Make sure every tags value is a list
+            self.df['tags'] = self.df['tags'].apply(lambda x: x if isinstance(x, list) else ([x] if pd.notnull(x) else []))
+
+        # compute length category
+        self.df['length'] = self.df['line_count'].apply(self.categorize_length)
+
+        # collect unique tags
+        all_tags = self.df['tags'].apply(lambda x: x).sum()
+        self.unique_tags = list(set(all_tags))
 
     def get_filtered_posts(self, length, language, tag):
         df_filtered = self.df[

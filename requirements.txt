@@ -7,3 +7,5 @@ pandas
 sentence-transformers
 faiss-cpu
 pyttsx3
+beautifulsoup4
+torchvision
